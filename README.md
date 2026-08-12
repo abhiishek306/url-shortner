@@ -22,6 +22,12 @@ The project is available locally at:
 http://localhost:8000
 ```
 
+Deployed application:
+
+```text
+https://url-shortner-h717.onrender.com/
+```
+
 From the homepage you can:
 - paste a long URL and create a short link
 - copy or open the generated short URL
