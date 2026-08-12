@@ -3,11 +3,14 @@ from collections.abc import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
+from app.core.database_url import normalize_async_database_url
 
 settings = get_settings()
+database_url, database_connect_args = normalize_async_database_url(settings.database_url)
 
 engine = create_async_engine(
-    settings.database_url,
+    database_url,
+    connect_args=database_connect_args,
     pool_size=20,
     max_overflow=40,
     pool_pre_ping=True,
