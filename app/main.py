@@ -431,7 +431,8 @@ async def index_page() -> HTMLResponse:
                         analyticsSocket.close();
                     }
 
-                    const wsUrl = `ws://${window.location.host}/ws/analytics/1?token=${token}`;
+                    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                    const wsUrl = `${wsScheme}://${window.location.host}/ws/analytics/1?token=${token}`;
                     analyticsSocket = new WebSocket(wsUrl);
 
                     analyticsSocket.onopen = () => {
@@ -458,7 +459,13 @@ async def index_page() -> HTMLResponse:
                         body: body.toString(),
                     });
                     if (!response.ok) {
-                        throw new Error('Could not get demo token');
+                        let details = '';
+                        try {
+                            details = await response.text();
+                        } catch {
+                            details = '';
+                        }
+                        throw new Error(details || `Could not get demo token (HTTP ${response.status})`);
                     }
                     const data = await response.json();
                     currentToken = data.access_token;
@@ -542,8 +549,8 @@ async def index_page() -> HTMLResponse:
                         connectAnalyticsSocket(token);
                         return refreshLinksTable();
                     })
-                    .catch(() => {
-                        statusEl.textContent = 'Authentication failed. Please refresh the page.';
+                    .catch((error) => {
+                        statusEl.textContent = error.message || 'Authentication failed. Please refresh the page.';
                     });
             </script>
         </body>
