@@ -32,6 +32,13 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(RateLimitMiddleware)
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "service": settings.app_name}
+
+
 app.include_router(api_router)
 app.include_router(public_router)
 app.include_router(analytics_ws_router)
@@ -557,8 +564,3 @@ async def index_page() -> HTMLResponse:
         </html>
         """
     )
-
-
-@app.get("/health")
-async def health_check():
-    return {"status": "ok", "service": settings.app_name}

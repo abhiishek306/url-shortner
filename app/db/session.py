@@ -11,8 +11,8 @@ database_url, database_connect_args = normalize_async_database_url(settings.data
 engine = create_async_engine(
     database_url,
     connect_args=database_connect_args,
-    pool_size=20,
-    max_overflow=40,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
     pool_pre_ping=True,
     pool_recycle=1800,
 )

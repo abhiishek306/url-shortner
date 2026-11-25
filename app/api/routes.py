@@ -11,7 +11,7 @@ from app.db.models import URL, User
 from app.db.session import get_db
 from app.schemas.url import CreateShortURLRequest, RedirectCachePayload, ShortURLResponse
 from app.services.analytics_service import enqueue_click_event
-from app.services.url_service import create_short_url, get_url_by_short_id
+from app.services.url_service import create_short_url, get_redirect_payload
 
 settings = get_settings()
 api_router = APIRouter(prefix="/api/v1", tags=["urls"])
@@ -44,6 +44,7 @@ async def list_urls(
 @api_router.delete("/urls/{url_id}", status_code=204)
 async def delete_url(
     url_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ):
@@ -53,6 +54,7 @@ async def delete_url(
 
     await db.delete(url)
     await db.commit()
+    await request.app.state.redis.delete(f"url:{url.short_id}")
     return None
 
 
@@ -107,39 +109,19 @@ async def issue_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Asyn
 
 @public_router.get("/{short_id}", status_code=302)
 async def redirect_short_url(short_id: str, request: Request, db: AsyncSession = Depends(get_db)):
-    redis_key = f"url:{short_id}"
-    cached = await request.app.state.redis.get(redis_key)
-
-    if cached:
-        cached_data = RedirectCachePayload.model_validate_json(cached)
-        original_url = cached_data.original_url
-        url_id = cached_data.url_id
-        user_id = cached_data.user_id
-    else:
-        url = await get_url_by_short_id(db, short_id)
-        if not url:
-            raise HTTPException(status_code=404, detail="Short URL not found")
-
-        cache_payload = RedirectCachePayload(
-            url_id=url.id,
-            user_id=url.user_id,
-            original_url=url.original_url,
-            expires_at=url.expires_at,
-        )
-        await request.app.state.redis.setex(
-            redis_key,
-            settings.cache_ttl_seconds,
-            cache_payload.model_dump_json(),
-        )
-        original_url = url.original_url
-        url_id = url.id
-        user_id = url.user_id
+    cache_payload, cache_hit = await get_redirect_payload(db, request.app.state.redis, short_id)
+    if not cache_payload:
+        raise HTTPException(status_code=404, detail="Short URL not found")
 
     await enqueue_click_event(
         short_id=short_id,
-        url_id=url_id,
-        user_id=user_id,
+        url_id=cache_payload.url_id,
+        user_id=cache_payload.user_id,
         request=request,
         redis_client=request.app.state.redis,
     )
-    return RedirectResponse(url=original_url, status_code=302)
+    return RedirectResponse(
+        url=cache_payload.original_url,
+        status_code=302,
+        headers={"X-URL-Cache": "HIT" if cache_hit else "MISS"},
+    )

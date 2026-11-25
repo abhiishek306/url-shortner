@@ -25,7 +25,7 @@
 7. Handler returns 302 immediately.
 8. Redirect handler appends click event to Redis Stream `analytics:clicks`.
 9. Worker consumes stream event, writes click analytics to PostgreSQL, and publishes JSON event to Redis channel `analytics:user:{user_id}`.
-9. WebSocket handler subscribed to the channel pushes event to connected clients instantly.
+10. WebSocket handler subscribed to the channel pushes event to connected clients instantly.
 
 ### 1.3 Performance-Critical Path
 - Redirect route avoids DB read when Redis cache hit occurs.
@@ -43,6 +43,8 @@ Numeric DB IDs are transformed into compact URL-safe strings using Base62 alphab
 - Deterministic and collision-free when sourced from unique integer IDs.
 
 Implementation: `app/core/base62.py`
+
+URL creation first lets PostgreSQL allocate the URL sequence ID, then replaces a unique temporary insert value with the Base62 representation of that ID. A unique index on `short_id` remains the final collision guard.
 
 #### 2.A.2 Data Model (SQLAlchemy)
 Tables:
@@ -62,6 +64,8 @@ Redirect behavior:
 2. On hit, parse cached payload and redirect.
 3. On miss, query PostgreSQL by indexed `short_id`, rehydrate cache, redirect.
 4. Trigger async analytics task.
+
+On a miss, the request acquires `url-lock:{short_id}` using Redis `SET NX EX`, then checks the cache again before accessing PostgreSQL. Other requests poll for the populated cache or acquire the lock after its owner exits; the owner renews its lease during a slow database lookup. Lock release compares the random ownership token, so a process cannot release a lock that has expired and been acquired by another process. Expired cache payloads are rejected as well as expired database rows.
 
 Implementation: `app/api/routes.py` (`redirect_short_url`).
 
@@ -115,10 +119,11 @@ Configured default: `20 requests / 60 seconds / IP`.
 1. Redirect endpoint calls `enqueue_click_event(...)`.
 2. Function enqueues event payload into Redis Stream `analytics:clicks` with `XADD`.
 3. Worker loop reads events via `XREADGROUP` and:
-- Inserts row into `click_analytics`.
-- Increments `urls.click_count` with atomic SQL update.
+- Inserts row into `click_analytics` using the Stream ID as an idempotency key.
+- Increments `urls.click_count` in the same PostgreSQL transaction, only when the analytics insert was new.
 - Publishes event JSON to `analytics:user:{user_id}` Redis channel.
-4. WebSocket endpoint subscribed to channel forwards each message to client.
+4. Worker periodically reclaims idle pending messages with `XAUTOCLAIM`. It acknowledges only after successful processing. Failed messages stay pending for retry and are written to `analytics:clicks:dead` after `REDIS_CLICK_MAX_ATTEMPTS`. Processing is at-least-once; database writes are idempotent, while a repeated Pub/Sub delivery is possible if acknowledgement fails after publication.
+5. WebSocket endpoint subscribed to channel forwards each message to client.
 
 Implementations:
 - Publisher: `app/services/analytics_service.py`
@@ -164,6 +169,12 @@ Hardening recommendations:
 - Redis provides shared coordination for cache, limiter state, and pub/sub messaging.
 - PostgreSQL can scale with read replicas for analytics queries (writes remain on primary).
 - Analytics workers run as separate processes/services and can be scaled independently from API pods.
+- Nginx dynamically resolves the Compose `api` service and balances HTTP and WebSocket traffic. The stack starts two API replicas; increase with `docker compose up -d --scale api=N`.
+- Database pool size and overflow are configurable per API worker process. Set these with replica count and PostgreSQL's maximum connection budget in mind.
+
+### 3.4 Reproducible Validation
+- Run `pytest -q` after installing `requirements-dev.txt` to exercise concurrent cache-miss coalescing and Stream retry/dead-letter behavior.
+- `scripts/benchmark.py` runs a fixed request count at fixed concurrency and reports throughput plus p50/p95/p99/mean latency as JSON. Record the commit and environment, including machine resources, replica count, request count, concurrency, and warmup, when comparing results.
 
 ## 4. Reliability & Operations
 

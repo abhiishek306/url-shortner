@@ -41,7 +41,10 @@ From the homepage you can:
 - Redis Streams for durable click event ingestion
 - Real-time analytics updates over WebSockets
 - Rate limiting per IP with atomic Redis sliding-window logic
-- Dockerized local stack with PostgreSQL, Redis, API, worker, and migrator services
+- Redis lock-based cache stampede protection
+- Idempotent analytics persistence, pending-entry recovery, retries, and dead lettering
+- Nginx load balancing across horizontally scaled API replicas
+- Dockerized stack with PostgreSQL, Redis, Nginx, API, worker, and migrator services
 
 ## Quick Start
 1. Copy env template:
@@ -55,6 +58,10 @@ docker compose up -d --build
 3. Verify service state:
 ```bash
 docker compose ps
+```
+The app is exposed through Nginx at `http://localhost:8000`. Compose starts two API replicas by default. Scale them independently with:
+```bash
+docker compose up -d --scale api=4
 ```
 
 Optional PowerShell helper (does preflight checks + startup):
@@ -92,6 +99,29 @@ http://localhost:8000/<short_id>
 Default limit is `20 requests/minute/IP`, configurable via:
 - `RATE_LIMIT_REQUESTS`
 - `RATE_LIMIT_WINDOW_SECONDS`
+
+## Reliability and Scaling
+- On a cache miss, a short-lived Redis lock ensures only one request populates the key; waiters recheck Redis before querying PostgreSQL.
+- Short IDs encode the database-generated URL ID and are protected by a PostgreSQL unique index. A unique temporary value is used only while the insert allocates its sequence ID.
+- The analytics worker reclaims idle pending Stream entries with `XAUTOCLAIM`, writes each Stream ID at most once to PostgreSQL, and acknowledges only after processing. Failed entries are retried up to `REDIS_CLICK_MAX_ATTEMPTS`, then written to `analytics:clicks:dead`.
+- The API is stateless and runs behind Nginx. Use `docker compose up -d --scale api=N` for more replicas. Tune `DB_POOL_SIZE` and `DB_MAX_OVERFLOW` with the PostgreSQL connection limit in mind; they apply per API worker process.
+
+## Automated Reliability Tests
+Install the development/test dependencies and run the async tests:
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+The tests cover cache-miss coalescing, concurrent sequence-backed URL ID generation, limiter boundary/concurrency behavior, duplicate analytics delivery, pending-message reclaim, and retry/dead-letter behavior using test doubles. They validate application logic but do not replace integration tests against real Redis and PostgreSQL.
+
+## Reproducible Redirect Benchmark
+Create a short URL, then run a fixed number of redirect requests at a fixed concurrency. `httpx` does not follow the 302, so this measures the shortener redirect path:
+```bash
+pip install -r requirements-dev.txt
+python scripts/benchmark.py --url http://localhost:8000/<short_id> --concurrency 50 --requests 5000 --warmup 100 --cold-samples 50 --redis-url redis://localhost:6379/0
+```
+The JSON output includes throughput, failures, p50/p95/p99/mean response latency, cache hit ratio, and mean latency for cache hits versus forced cold-cache samples. Cold sampling deletes `url:<short_id>` from the specified Redis instance before each request. Redirect responses include `X-URL-Cache: HIT|MISS` for this measurement. Record the commit, machine/container resources, Compose replica count, request count, concurrency, and warmup when comparing runs; benchmark results depend on the environment.
+For an unrestricted run, configure `RATE_LIMIT_REQUESTS` above the combined measured and warmup request count (and set a suitable window) before starting the stack; otherwise 429 responses are counted as failures.
 
 ## How the System Works
 1. A user creates a short URL from the browser or API.
@@ -134,7 +164,7 @@ http://localhost:8000
 ```
 
 ### Production-minded recommendations
-- run the API behind a reverse proxy such as Nginx or Traefik
+- use the included Nginx reverse proxy and scale API replicas independently
 - place PostgreSQL and Redis in managed services or dedicated hosts
 - scale API workers independently from analytics workers
 - configure environment variables for your real domain, secret keys, and rate limits

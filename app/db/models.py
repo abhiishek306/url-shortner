@@ -48,6 +48,7 @@ class ClickAnalytics(Base):
     __table_args__ = (
         Index("ix_click_analytics_url_time", "url_id", "clicked_at"),
         Index("ix_click_analytics_user_time", "user_id", "clicked_at"),
+        Index("uq_click_analytics_stream_id", "stream_id", unique=True),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -58,6 +59,7 @@ class ClickAnalytics(Base):
     ip_address: Mapped[str] = mapped_column(String(64), nullable=False)
     browser: Mapped[str] = mapped_column(String(128), nullable=False)
     referrer: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stream_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     clicked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
